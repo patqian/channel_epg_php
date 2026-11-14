@@ -2,7 +2,7 @@
 <html>
 <head>
 <head>
-<title>直播源数据转化240123v7</title>
+<title>直播源数据转化261115v1</title>
 <script>
 	function disableRadios(radio) {
 		var checkboxes = document.getElementsByTagName('input');
@@ -79,6 +79,38 @@
 			reader.readAsText(file);
 		}
 	}
+	function checkTableName() {
+		var custom = document.querySelector('input[name="sqltable"][value="custom"]');
+		var inp = document.getElementById('sqltablecustom');
+		var tip = document.getElementById('sqltabletip');
+		if (!custom || !inp || !tip || !custom.checked) return;
+		var v = inp.value.trim();
+		if (v === '') {
+			tip.textContent = '请输入表名';
+			inp.style.borderColor = '#c00';
+		} else if (!/^[A-Za-z0-9_]+$/.test(v)) {
+			tip.textContent = '只能包含字母、数字、下划线_';
+			inp.style.borderColor = '#c00';
+		} else {
+			tip.textContent = '';
+			inp.style.borderColor = '';
+		}
+	}
+	function toggleTableInput() {
+		var custom = document.querySelector('input[name="sqltable"][value="custom"]');
+		var inp = document.getElementById('sqltablecustom');
+		if (!custom || !inp) return;
+		inp.disabled = !custom.checked;
+		inp.style.opacity = custom.checked ? '1' : '0.4';
+		var tip = document.getElementById('sqltabletip');
+		if (custom.checked) {
+			checkTableName();
+		} else if (tip) {
+			tip.textContent = '';
+			inp.style.borderColor = '';
+		}
+	}
+	window.addEventListener('DOMContentLoaded', toggleTableInput);
 </script>
 <style type="text/css">
 .tex{
@@ -92,6 +124,19 @@
 error_reporting(0);
 // http://127.0.0.1/diyp/l2list.php
 // aming.ou QQ:3364776 
+
+// 不处理模式下直接收集输出行, 最后统一放进文本框
+$directOutput = array();
+
+// SQL 目标表名, 默认 list
+$sqltable = 'list';
+$sqltableError = '';
+
+// 当前访问地址对应的 EPG 地址, 例如 http://127.0.0.1:8899/epg.php
+$epgScheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] != 'off') ? 'https' : 'http';
+$epgHost = isset($_SERVER['HTTP_HOST']) ? $_SERVER['HTTP_HOST'] : '127.0.0.1';
+$epgDir = rtrim(str_replace('\\', '/', dirname(isset($_SERVER['SCRIPT_NAME']) ? $_SERVER['SCRIPT_NAME'] : '/l2list.php')), '/');
+$epgUrl = $epgScheme . '://' . $epgHost . $epgDir . '/epg.php';
 
 // 判断是否有表单提交
 if ($_SERVER["REQUEST_METHOD"] == "POST") {
@@ -120,12 +165,29 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
 	}
 	if ($optmerge == '3') $merge = false;
 
+	// SQL 目标表名: 默认 list, 或用户自定义(只允许字母/数字/下划线)
+	if (isset($_POST['sqltable']) && $_POST['sqltable'] == 'custom')
+	{
+		$customTable = trim(isset($_POST['sqltablecustom']) ? $_POST['sqltablecustom'] : '');
+		if ($customTable === '')
+		{
+			$sqltableError = '请输入表名';
+		}elseif (!preg_match('/^[A-Za-z0-9_]+$/', $customTable))
+		{
+			$sqltableError = '表名只能包含字母、数字、下划线';
+		}else{
+			$sqltable = $customTable;
+		}
+	}else{
+		$sqltable = 'list';
+	}
+
 	$isdelCounter = 1;
 	
 	if (class_exists("SQLite3"))
 	{
 		$db = new SQLite3(':memory:'); // 这将创建一个临时的内存数据库
-		$db->exec("CREATE TABLE if not exists 'tmp_list' (item text, title text, epg text, url text, isdel integer null default 120);");
+		$db->exec("CREATE TABLE if not exists 'tmp_list' (item text, title text, epg text, url text, isdel integer null default 120, logo text, catchup text, catchup_source text, blank_after integer default 0);");
 		if ($debug) $db = null;
 	}else{
 		$db = null;
@@ -150,6 +212,12 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
     <input type="radio" name="gender2" value="1" <?php if(isset($_POST['gender2']) && $_POST['gender2'] == '1') echo "checked"; ?> > 去重
 	<input type="radio" name="gender2" value="2" <?php if(isset($_POST['gender2']) && $_POST['gender2'] == '2') echo "checked"; ?> > 合并
 	<input type="radio" name="gender2" value="3" <?php if(isset($_POST['gender2']) && $_POST['gender2'] == '3') echo "checked"; ?> > 不处理
+	<br>
+	<font size="" color="#000000" style="line-height: 3;"><b>SQL表名：</b></font>
+	<input type="radio" name="sqltable" value="list" <?php if(!isset($_POST['sqltable']) || $_POST['sqltable'] != 'custom') echo "checked"; ?> onchange="toggleTableInput()"> 默认(list)
+	<input type="radio" name="sqltable" value="custom" <?php if(isset($_POST['sqltable']) && $_POST['sqltable'] == 'custom') echo "checked"; ?> onchange="toggleTableInput()"> 自定义
+	<input type="text" id="sqltablecustom" name="sqltablecustom" placeholder="输入表名, 仅限字母数字下划线" value="<?php echo isset($_POST['sqltablecustom']) ? htmlspecialchars($_POST['sqltablecustom']) : ''; ?>" disabled="disabled" style="opacity:0.4;" oninput="checkTableName()">
+	<span id="sqltabletip" style="color:#c00;margin-left:8px;"><?php echo $sqltableError; ?></span>
 	<br>
 	<input type="submit" id="button1" name="button1" value="转换M3U/TXT文本" disabled="true"> - 
 	<input type="submit" id="button2" name="button2" value="解析M3U/TXT网址" disabled="true">
@@ -182,6 +250,17 @@ $dataSources = [
 'http://127.0.0.1/diyp/m3u.php'
 ]; 
 
+// 生成单条 INSERT 语句, 列结构与 live.php / xml2db.php 的 list 表保持一致
+function sqlstr($v)
+{
+	return str_replace("'", "''", trim((string)$v));
+}
+function sql_insert($table, $item, $title, $epg, $url, $isdel, $logo = '', $catchup = '', $catchup_source = '')
+{
+	return "INSERT or replace INTO `" . $table . "` (item,title,epg,url,isdel,logo,catchup,catchup_source,blank_after) VALUES ('"
+		. sqlstr($item) . "','" . sqlstr($title) . "','" . sqlstr($epg) . "','" . sqlstr($url) . "','" . intval($isdel) . "','"
+		. sqlstr($logo) . "','" . sqlstr($catchup) . "','" . sqlstr($catchup_source) . "',0);";
+}
 // 拆分字符串后取数组中出现次数最多的元素
 function maxstr($string)
 {
@@ -387,7 +466,7 @@ if (isset($_POST['button1']))
 	echo "<script>bt1();</script>";
 	// Button 1被点击时执行的操作
 	echo "<h3>转换文本内容如下：</h3>";
-	if ($debug) echo "频道分组|频道名称|EPG名称|直播源网址<br>";
+	if ($debug) $directOutput[] = "频道分组|频道名称|EPG名称|直播源网址";
 	$data = trim($_POST['m3uContent']); 
 	// 先按m3u格式进行解析
 	$result = formatm3u($data); 
@@ -410,33 +489,35 @@ if (isset($_POST['button1']))
 			{
 				if (isset($db) && $merge) 
 				{
-					$db->exec("INSERT or replace INTO `tmp_list` VALUES ('". $tv['group-title'] ."','". trim(substr($tv['something'] , 1)) ."','". $tv['tvg-name'] ."','". $url ."','". $isdelCounter ."');");
+					$db->exec(sql_insert('tmp_list', $tv['group-title'], trim(substr($tv['something'] , 1)), isset($tv['tvg-id']) ? $tv['tvg-id'] : '', $url, $isdelCounter, isset($tv['tvg-logo']) ? $tv['tvg-logo'] : '', isset($tv['catchup']) ? $tv['catchup'] : '', isset($tv['catchup-source']) ? $tv['catchup-source'] : ''));
 				}else{
 					// 不支持SQLite数据库时,直接打印结果
 					if ($debug)
 					{
-						print($tv['group-title'] . "|" . substr($tv['something'] , 1) . "|" . $tv['tvg-name'] . "|" . $url . "|" . $isdelCounter . "<br>");
-					}else if ($tosql=='sql')
+						$directOutput[] = $tv['group-title'] . "|" . substr($tv['something'] , 1) . "|" . $tv['tvg-name'] . "|" . $url . "|" . $isdelCounter;
+					}else if ($tosql=='sql' && $sqltableError === '')
 					{
-						print("INSERT or replace INTO `list` VALUES ('". $tv['group-title'] ."','". trim(substr($tv['something'] , 1)) ."','". $tv['tvg-name'] ."','". $url ."','". $isdelCounter ."');<br>");
+						$sqlTitle = trim(substr($tv['something'] , 1));
+						$sqlEpg = isset($tv['tvg-id']) ? $tv['tvg-id'] : ''; // 与 live.php 导出对应: list.epg 存 tvg-id
+						$directOutput[] = sql_insert($sqltable, $tv['group-title'], $sqlTitle, $sqlEpg, $url, $isdelCounter, isset($tv['tvg-logo']) ? $tv['tvg-logo'] : '', isset($tv['catchup']) ? $tv['catchup'] : '', isset($tv['catchup-source']) ? $tv['catchup-source'] : '');
 					}else if ($tosql=='txt'){
 						if ($currentItem != $tv['group-title'])
 						{
 							$currentItem = $tv['group-title'];
-							print($tv['group-title'] . ",#genre#" . "<br>");
+							$directOutput[] = $tv['group-title'] . ",#genre#";
 						}
-						print(trim(substr($tv['something'] , 1)) . "," . $url . "<br>");
+						$directOutput[] = trim(substr($tv['something'] , 1)) . "," . $url;
 					}else if ($tosql=='m3u'){
 						if ($isdelCounter ===1)
 						{
-							print("#EXTM3U x-tvg-url=" . '"http://127.0.0.1/diyp/epg.php"' . "<br>");
+							$directOutput[] = '#EXTM3U x-tvg-url="' . (isset($result[-1]['x-tvg-url']) ? $result[-1]['x-tvg-url'] : $epgUrl) . '"';
 						}
 						if (empty($tv['tvg-name']))
 						{
 							$tv['tvg-name'] = formatTitle(trim(substr($tv['something'] , 1)));
 						}
-						print('#EXTINF:-1 tvg-id="" tvg-logo="" tvg-name="' . $tv['tvg-name'] . '" group-title="' . $tv['group-title'] . '",' . trim(substr($tv['something'] , 1)) . "<br>");
-						print($url . "<br>");
+						$directOutput[] = '#EXTINF:-1 tvg-id="' . (isset($tv['tvg-id']) ? $tv['tvg-id'] : '') . '" tvg-name="' . $tv['tvg-name'] . '"' . (empty($tv['tvg-logo']) ? '' : ' tvg-logo="' . $tv['tvg-logo'] . '"') . ' group-title="' . $tv['group-title'] . '"' . (empty($tv['catchup']) ? '' : ' catchup="' . $tv['catchup'] . '"') . (empty($tv['catchup-source']) ? '' : ' catchup-source="' . $tv['catchup-source'] . '"') . ',' . trim(substr($tv['something'] , 1));
+						$directOutput[] = $url;
 					}
 				}
 				$isdelCounter++;
@@ -452,7 +533,7 @@ else if (isset($_POST['button2']))
 	echo "<script>bt2();</script>";
 	// Button 2被点击时执行的操作
 	echo "<h3>解析网址内容如下：</h3>";
-	if ($debug) echo "频道分组|频道名称|EPG名称|直播源网址<br>";
+	if ($debug) $directOutput[] = "频道分组|频道名称|EPG名称|直播源网址";
 	$m3uContent = $_POST['m3uContent']; 
 	$dataSources = explode("\n", $m3uContent);
 	foreach ($dataSources as $dataSource)
@@ -491,29 +572,29 @@ else if (isset($_POST['button2']))
 					{
 						if (isset($db) && $merge) 
 						{
-							$db->exec("INSERT or replace INTO `tmp_list` VALUES ('". $tv['group-title'] ."','". trim(substr($tv['something'] , 1)) ."','". $tv['tvg-name'] ."','". $url ."','". $isdelCounter ."');");
+							$db->exec(sql_insert('tmp_list', $tv['group-title'], trim(substr($tv['something'] , 1)), isset($tv['tvg-id']) ? $tv['tvg-id'] : '', $url, $isdelCounter, isset($tv['tvg-logo']) ? $tv['tvg-logo'] : '', isset($tv['catchup']) ? $tv['catchup'] : '', isset($tv['catchup-source']) ? $tv['catchup-source'] : ''));
 						}else{
 							// 不支持SQLite数据库时,直接打印结果
 							if ($debug)
 							{
-								print($tv['group-title'] . "|" . substr($tv['something'] , 1) . "|" . $tv['tvg-name'] . "|" . $url . "|" . $isdelCounter . "<br>");
-							}else if ($tosql=='sql')
+								$directOutput[] = $tv['group-title'] . "|" . substr($tv['something'] , 1) . "|" . $tv['tvg-name'] . "|" . $url . "|" . $isdelCounter;
+							}else if ($tosql=='sql' && $sqltableError === '')
 							{
-								print("INSERT or replace INTO `list` VALUES ('". $tv['group-title'] ."','". trim(substr($tv['something'] , 1)) ."','". $tv['tvg-name'] ."','". $url ."','". $isdelCounter ."');<br>");
+								$directOutput[] = sql_insert($sqltable, $tv['group-title'], trim(substr($tv['something'] , 1)), isset($tv['tvg-id']) ? $tv['tvg-id'] : '', $url, $isdelCounter, isset($tv['tvg-logo']) ? $tv['tvg-logo'] : '', isset($tv['catchup']) ? $tv['catchup'] : '', isset($tv['catchup-source']) ? $tv['catchup-source'] : '');
 							}else if ($tosql=='txt'){
 								if ($currentItem != $tv['group-title'])
 								{
 									$currentItem = $tv['group-title'];
-									print($tv['group-title'] . ",#genre#" . "<br>");
+									$directOutput[] = $tv['group-title'] . ",#genre#";
 								}
-								print(trim(substr($tv['something'] , 1)) . "," . $url . "<br>");
+								$directOutput[] = trim(substr($tv['something'] , 1)) . "," . $url;
 							}else if ($tosql=='m3u'){
 								if ($isdelCounter ===1)
 								{
-									print("#EXTM3U x-tvg-url=" . '"http://127.0.0.1/diyp/epg.php"' . "<br>");
+									$directOutput[] = '#EXTM3U x-tvg-url="' . (isset($result[-1]['x-tvg-url']) ? $result[-1]['x-tvg-url'] : $epgUrl) . '"';
 								}
-								print('#EXTINF:-1 tvg-id="" tvg-logo="" tvg-name="' . $tv['tvg-name'] . '" group-title="' . $tv['group-title'] . '",' . trim(substr($tv['something'] , 1)) . "<br>");
-								print($url . "<br>");
+								$directOutput[] = '#EXTINF:-1 tvg-id="' . (isset($tv['tvg-id']) ? $tv['tvg-id'] : '') . '" tvg-name="' . $tv['tvg-name'] . '"' . (empty($tv['tvg-logo']) ? '' : ' tvg-logo="' . $tv['tvg-logo'] . '"') . ' group-title="' . $tv['group-title'] . '"' . (empty($tv['catchup']) ? '' : ' catchup="' . $tv['catchup'] . '"') . (empty($tv['catchup-source']) ? '' : ' catchup-source="' . $tv['catchup-source'] . '"') . ',' . trim(substr($tv['something'] , 1));
+								$directOutput[] = $url;
 							}
 						}
 						$isdelCounter++;
@@ -525,6 +606,15 @@ else if (isset($_POST['button2']))
 
 		}
 	}
+}
+// 不处理模式: 把收集到的内容放进文本框, 方便查看和保存文件
+if (count($directOutput) > 0)
+{
+	echo '<div style="width:1024px">' .
+	'<textarea id="outContent" name="outContent" rows="10" cols="100%" style="width:1024px">' . implode(PHP_EOL, $directOutput) . '</textarea>' .
+	'<button id="saveContent" name="saveContent" type="button" style="float:right" onClick="saveFile()">保存文件</button>' .
+	'<input type="hidden" id="savetype" name="savetype" value="' . ($tosql == 'deb' ? 'txt' : $tosql) . '">' .
+	'</div>';
 }
 try {
 	if (isset($db))
@@ -538,7 +628,7 @@ try {
 			$result = $db->query("SELECT * from `tmp_list` where isdel > 0 order by isdel;");
 			while ($row = $result->fetchArray())
 			{
-				$config[] = ['item' => $row[0], 'title' => sprintf("%s", trim($row[1])), 'epg' => sprintf("%s", maxstr($row[2])), 'url' => trim(sprintf("%s", $row[3])), 'isdel' => $row[4]];
+				$config[] = ['item' => $row[0], 'title' => sprintf("%s", trim($row[1])), 'epg' => sprintf("%s", maxstr($row[2])), 'url' => trim(sprintf("%s", $row[3])), 'isdel' => $row[4], 'logo' => sprintf("%s", trim($row[5])), 'catchup' => sprintf("%s", trim($row[6])), 'catchup_source' => sprintf("%s", trim($row[7]))];
 			}
 			// 合并分组
 			$groupconfig = array_reduce($config, function($result, $item)
@@ -561,11 +651,14 @@ try {
 						$gender = $item['title'];
 						if (!isset($result[$gender]))
 						{
-							$result[$gender] = array('title' => $gender,'url' => array(),'epg' => array(),'isdel' => array());
+							$result[$gender] = array('title' => $gender,'url' => array(),'epg' => array(),'isdel' => array(),'logo' => array(),'catchup' => array(),'catchup_source' => array());
 						}
 						$result[$gender]['url'][] = $item['url'];
 						$result[$gender]['epg'][] = $item['epg'];
 						$result[$gender]['isdel'][] = $item['isdel'];
+						$result[$gender]['logo'][] = $item['logo'];
+						$result[$gender]['catchup'][] = $item['catchup'];
+						$result[$gender]['catchup_source'][] = $item['catchup_source'];
 						return $result;
 					}, []);
 				$config[$item] = $channels;
@@ -582,7 +675,6 @@ try {
 					foreach ($titles as $k => $v)
 					{					
 						$epg = maxstr(implode('#',$v['epg']));
-						$epg = $epg === '' ? formatTitle($v['title']) : $epg;
 						$title =  formatTitle($v['title'],2);
 						$url = formatUrls(implode('#',$v['url']));
 						if ($optmerge === '2'){
@@ -598,26 +690,34 @@ try {
 				}
 				return $config;
 			}
-			function genm3u($groupconfig,$optmerge)
+			function genm3u($groupconfig,$optmerge,$epgUrl)
 			{
 				$config = array();
-				$config[] = '#EXTM3U x-tvg-url="http://127.0.0.1/diyp/epg.php"';
+				$config[] = '#EXTM3U x-tvg-url="' . $epgUrl . '"';
 				foreach ($groupconfig as $item => $titles)
 				{
 					foreach ($titles as $k => $v)
 					{
 						$epg = maxstr(implode('#',$v['epg']));
-						$epg = $epg === '' ? formatTitle($v['title']) : $epg;
 						$title =  formatTitle($v['title'],2);
 						$url = formatUrls(implode('#',$v['url']));
+						$logo = maxstr(implode('#',$v['logo']));
+						$catchup = maxstr(implode('#',$v['catchup']));
+						$catchup_source = maxstr(implode('#',$v['catchup_source']));
+						$line = sprintf('#EXTINF:-1 tvg-id="%s" tvg-name="%s"', $epg, $title);
+						if ($logo !== '') $line .= sprintf(' tvg-logo="%s"', $logo);
+						$line .= sprintf(' group-title="%s"', $item);
+						if ($catchup !== '') $line .= sprintf(' catchup="%s"', $catchup);
+						if ($catchup_source !== '') $line .= sprintf(' catchup-source="%s"', $catchup_source);
+						$line .= ',' . $title;
 						if ($optmerge === '2'){
-							$config[] = sprintf('#EXTINF:-1 tvg-id="" tvg-name="%s" tvg-logo="" group-title="%s",%s', $epg, $item, $title);
+							$config[] = $line;
 							$config[] = $url;
 						}else{
 							$urls = explode("#", $url);
 							foreach($urls as $url)
 							{
-								$config[] = sprintf('#EXTINF:-1 tvg-id="" tvg-name="%s" tvg-logo="" group-title="%s",%s', $epg, $item, $title);
+								$config[] = $line;
 								$config[] = $url;
 							}
 						}
@@ -626,7 +726,7 @@ try {
 				return $config;
 			}
 
-			function gensql($groupconfig,$optmerge)
+			function gensql($groupconfig,$optmerge,$table)
 			{
 				$config = array();
 				$isdelCounter = 120;
@@ -636,16 +736,18 @@ try {
 					{
 						$isdel = false ? min($v['isdel']) : $isdelCounter;
 						$epg = maxstr(implode('#',$v['epg']));
-						$epg = $epg === '' ? formatTitle($v['title']) : $epg;
 						$title =  formatTitle($v['title'],2);
 						$url = formatUrls(implode('#',$v['url']));
+						$logo = maxstr(implode('#',$v['logo']));
+						$catchup = maxstr(implode('#',$v['catchup']));
+						$catchup_source = maxstr(implode('#',$v['catchup_source']));
 						if ($optmerge === '2'){
-							$config[] = "INSERT or replace INTO `list` VALUES ('". $item ."','". $title ."','". $epg ."','". $url ."','". $isdel ."');";
+							$config[] = sql_insert($table, $item, $title, $epg, $url, $isdel, $logo, $catchup, $catchup_source);
 						}else{
 							$urls = explode("#", $url);
 							foreach($urls as $url)
 							{
-								$config[] = "INSERT or replace INTO `list` VALUES ('". $item ."','". $title ."','". $epg ."','". $url ."','". $isdel ."');";
+								$config[] = sql_insert($table, $item, $title, $epg, $url, $isdel, $logo, $catchup, $catchup_source);
 							}
 						}
 						$isdelCounter = $isdelCounter + 2;
@@ -655,11 +757,11 @@ try {
 			}
 			// 按需输出
 			if ($tosql=='sql'){
-				$output = gensql($groupconfig,$optmerge);
+				$output = $sqltableError === '' ? gensql($groupconfig,$optmerge,$sqltable) : array();
 			}else if ($tosql=='txt'){
 				$output = gentxt($groupconfig,$optmerge);
 			}else if ($tosql=='m3u'){
-				$output = genm3u($groupconfig,$optmerge);
+				$output = genm3u($groupconfig,$optmerge,$epgUrl);
 			}else{
 				$output = [];
 			}
@@ -669,7 +771,7 @@ try {
 				'<div style="width:1024px">' .
 				'<textarea id="outContent" name="outContent" rows="10" cols="100%" style="width:1024px">'. implode(PHP_EOL, $output) . '</textarea>' .
 				'<button id="saveContent" name="saveContent" type="button" style="float:right" onClick="saveFile()">保存文件</button>' .
-				'<input type="hidden" id="savetype" name="savetype" value="' . $tosql . '">' .
+				'<input type="hidden" id="savetype" name="savetype" value="' . ($tosql == 'deb' ? 'txt' : $tosql) . '">' .
 				'</div>';
 			}
 		}
