@@ -22,6 +22,7 @@ $optmerge = !empty($_GET["m"]) ? strtolower($_GET["m"]) : '2'; // '1'输出仅�
 if ($optmerge !== '1') $optmerge = '2';
 $token = !empty($_GET["token"]) ? $_GET["token"] : '';
 $debug = !empty($_GET["debug"]) ? true : false;
+$isw = false; // true 写入访问日志, false 不写入, 避免播放器高频请求时与 xml2db 抢占 SQLite 写锁
 if ($debug){
 	echo var_dump($utf8) . $t . "<br>" . $optmerge . "<br>"  ;
 }
@@ -68,7 +69,10 @@ if ($liveConfig && !empty($token) && isset($liveConfig['token'][$token])) {
     $tableName = $liveConfig['ipsubnet'][$ipSubnet];
 }
 // 将IP地址记录到日志文件或数据库中
-$result = $channel->query("INSERT or ignore INTO access_log (ip_address,access_time,url) VALUES ('{$ip}','{$time}','{$source_link}');");
+if ($isw) {
+	$source_link_esc = SQLite3::escapeString($source_link);
+	$result = $channel->query("INSERT or ignore INTO access_log (ip_address,access_time,url) VALUES ('{$ip}','{$time}','{$source_link_esc}');");
+}
 
 // 返回TVBOX直播源接口文件
 if ($t ==='tvbox')
@@ -111,8 +115,8 @@ if ($t ==='tvbox')
 //开始获取频道数据
 $tableExists = $channel->querySingle("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='{$tableName}'");
 if ($tableExists == 0) {
-	$channel->exec("CREATE TABLE `{$tableName}` (item text, title text, epg text, url text, isdel integer null default 120, constraint name_pk primary key (item,title,url))");
-	$channel->exec("INSERT INTO `{$tableName}` VALUES ('IPTV组播','CCTV-1','','http://192.168.1.201:4022/rtp/239.10.0.114:1025$高清',95)");
+	$channel->exec("CREATE TABLE `{$tableName}` (item text, title text, epg text, url text, isdel integer null default 120, logo text, catchup text, catchup_source text, blank_after integer default 0, constraint name_pk primary key (item,title,url))");
+	$channel->exec("INSERT INTO `{$tableName}` (item,title,epg,url,isdel,logo,catchup,catchup_source,blank_after) VALUES ('IPTV组播','CCTV-1','','http://192.168.1.201:4022/rtp/239.10.0.114:1025$高清',95,'','','',0)");
 }
 $result = $channel->query("SELECT * from `{$tableName}` where isdel > 0 order by isdel;");
 $config = array();
@@ -228,32 +232,34 @@ function gentxt($groupconfig,$optmerge = 2)
 	return implode(PHP_EOL, $config);
 }
 
-function genm3u($groupconfig,$optmerge = 2)
+// 按 list 表原始顺序与字段还原 m3u, 保证与源播放列表逐行一致
+function genm3u($channel, $tableName)
 {
 	$config = array();
-	$config[] = '#EXTM3U x-tvg-url="http://127.0.0.1/diyp/epg.php"';
-	foreach ($groupconfig as $item => $titles)
+	// 表头 EPG 地址按当前访问地址动态生成: 协议://主机/所在目录/epg.php
+	$epgScheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] != 'off') ? 'https' : 'http';
+	$epgHost = isset($_SERVER['HTTP_HOST']) ? $_SERVER['HTTP_HOST'] : '127.0.0.1';
+	$epgDir = rtrim(str_replace('\\', '/', dirname(isset($_SERVER['SCRIPT_NAME']) ? $_SERVER['SCRIPT_NAME'] : '/live.php')), '/');
+	$epgUrl = $epgScheme . '://' . $epgHost . $epgDir . '/epg.php';
+	$config[] = '#EXTM3U x-tvg-url="' . $epgUrl . '"';
+	$result = $channel->query("SELECT item,title,epg,url,logo,catchup,catchup_source,blank_after FROM `{$tableName}` WHERE isdel > 0 ORDER BY isdel;");
+	if (!$result) return implode("\n", $config) . "\n";
+	while ($row = $result->fetchArray(SQLITE3_ASSOC))
 	{
-		foreach ($titles as $k => $v)
+		$line = '#EXTINF:-1 tvg-id="' . $row['epg'] . '" tvg-name="' . $row['title'] . '"';
+		if (!empty($row['logo'])) $line .= ' tvg-logo="' . $row['logo'] . '"';
+		$line .= ' group-title="' . $row['item'] . '"';
+		if (!empty($row['catchup'])) $line .= ' catchup="' . $row['catchup'] . '"';
+		if (!empty($row['catchup_source'])) $line .= ' catchup-source="' . $row['catchup_source'] . '"';
+		$line .= ',' . $row['title'];
+		$config[] = $line;
+		foreach (explode('#', $row['url']) as $url)
 		{
-			$epg = maxstr(implode('#',$v['epg']));
-			$epg = $epg === '' ? formatTitle($v['title']) : $epg;
-			$title =  formatTitle($v['title'],2);
-			$url = formatUrls(implode('#',$v['url']));
-			if ($optmerge === '2'){
-				$config[] = sprintf('#EXTINF:-1 tvg-id="" tvg-name="%s" tvg-logo="" group-title="%s",%s', $epg, $item, $title);
-				$config[] = $url;
-			}else{
-				$urls = explode("#", $url);
-				foreach($urls as $url)
-				{
-					$config[] = sprintf('#EXTINF:-1 tvg-id="" tvg-name="%s" tvg-logo="" group-title="%s",%s', $epg, $item, $title);
-					$config[] = $url;
-				}
-			}
+			if ($url !== '') $config[] = $url;
 		}
+		if (!empty($row['blank_after'])) $config[] = '';
 	}
-	return implode(PHP_EOL, $config);
+	return implode("\n", $config) . "\n";
 }
 
 function genjson($groupconfig,$optmerge = 2)
@@ -287,19 +293,18 @@ function genjson($groupconfig,$optmerge = 2)
 			}
 		}
 	}
-	return $utf8 ? json_encode($config) : json_encode($config, JSON_UNESCAPED_UNICODE + JSON_UNESCAPED_SLASHES);
+	return $utf8 ? json_encode($config) : json_encode($config, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 }
 
 // 返回直播源
 if ($t === 'm3u'){
-	$str = genm3u($groupconfig,$optmerge);
+	$str = genm3u($channel,$tableName);
 	if (!$debug){
 	header_remove();
 	header('Content-type: text/plain');
 	header('Content-Disposition: attachment; filename=live.m3u');}
 	echo $str;
 }elseif ($t === 'json'){
-	echo var_dump($utf8);
 	$str = genjson($groupconfig,$optmerge);
 	if (!$debug){
 	header_remove();
