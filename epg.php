@@ -16,7 +16,7 @@ $debug = !empty($_GET["debug"]) ? true : false;
 // 传入参数
 $riqi = !empty($_GET["date"]) ? $_GET["date"] : date("Y-m-d");
 $ch = !empty($_GET["ch"]) ? $_GET["ch"] : $_GET["channel"];
-$ch = empty($ch) ? 'CCTV1' : $ch;
+$ch = empty($ch) ? 'CCTV1综合高清' : $ch; //不带参数时的默认频道, 需与 epg_channel 表中存在的频道名一致
 // 'diyp' ,返回DIYP final版的epg数据, sptv 返回超级直播的epg数据, 默认返回DIYP epg格式
 $tvapp = !empty($_GET["channel"]) ? 'sptv' : 'diyp';
 
@@ -123,9 +123,10 @@ if ($ch === 'xml')
 	$programme_data = array(); 
 	$channels = array();
 	// 获取今天开始的所有频道节目数据,并去重
-	$sql = "SELECT DISTINCT e.channel, e.title, e.sdate, e.sstart, e.sstop
-			FROM epg_programme e where e.sdate >= '" . $riqi . "' and e.channel in (select DISTINCT channel_id from epg_channel)" ;
-	$retval = $channel->query($sql);
+	$stmt = $channel->prepare("SELECT DISTINCT e.channel, e.title, e.sdate, e.sstart, e.sstop
+			FROM epg_programme e where e.sdate >= :riqi and e.channel in (select DISTINCT channel_id from epg_channel)");
+	$stmt->bindValue(':riqi', $riqi, SQLITE3_TEXT);
+	$retval = $stmt->execute();
 	while ($row = $retval->fetchArray())
 	{ 
 		// 整理节目信息
@@ -181,9 +182,12 @@ else
 { 
 	// diyp $ sptv format
 	// 查询频道名对应的节目单是否存在
-	$sql = "SELECT DISTINCT * FROM epg_programme WHERE channel = (SELECT channel_id  FROM epg_channel where upper(name)='" . strtoupper($ch) . "' limit 1) AND sdate = '" . $riqi . "'";
+	$sql = "SELECT DISTINCT * FROM epg_programme WHERE channel = (SELECT channel_id  FROM epg_channel where upper(name)=:ch limit 1) AND sdate = :riqi";
 	$is_found = 0;
-	$retval = $channel->query($sql);
+	$stmt = $channel->prepare($sql);
+	$stmt->bindValue(':ch', strtoupper($ch), SQLITE3_TEXT);
+	$stmt->bindValue(':riqi', $riqi, SQLITE3_TEXT);
+	$retval = $stmt->execute();
 	while ($row = $retval->fetchArray())
 	{
 		$is_found = 1;
